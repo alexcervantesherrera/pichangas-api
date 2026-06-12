@@ -1,0 +1,27 @@
+# Build outputs
+bin/
+obj/
+
+# IDE
+.vs/
+*.user
+*.suo
+.idea/
+*.swp
+
+# Secrets — NEVER commit these
+appsettings.Development.json
+appsettings.Production.json
+appsettings.Staging.json
+
+# dotnet tools manifest (local)
+.dotnet/
+
+# Runtime logs
+*.log
+*.err
+
+# NuGet cache
+*.nupkg
+packages/
+nuget.dgspec.json
