@@ -114,6 +114,15 @@ app.MapPost("/auth/login", async (LoginDto dto, AppDbContext db) =>
 
 // ── Jugadores ─────────────────────────────────────────────────────────────────
 
+app.MapGet("/jugadores", async (string? q, AppDbContext db) =>
+{
+    var query = db.Usuarios.AsQueryable();
+    if (!string.IsNullOrWhiteSpace(q))
+        query = query.Where(u => u.Nombre.ToLower().Contains(q.ToLower()));
+    var users = await query.OrderBy(u => u.Nombre).Take(50).ToListAsync();
+    return Results.Ok(users.Select(u => new { u.Id, u.Nombre, u.Posiciones, u.Evaluado }));
+}).RequireAuthorization();
+
 app.MapPut("/jugadores/me/capacidades", async (CapacidadesDto dto, ClaimsPrincipal claims, AppDbContext db) =>
 {
     var user = await db.Usuarios.FindAsync(UserId(claims));
@@ -156,7 +165,7 @@ app.MapGet("/jugadores/{id:guid}", async (Guid id, AppDbContext db) =>
     if (user is null) return Results.NotFound();
     var vals = await db.Validaciones.Where(v => v.JugadorId == id).ToListAsync();
     var rating = RatingService.CalcRating(user, vals);
-    return Results.Ok(new { user.Id, user.Nombre, user.Email, user.TallaCm, user.Posiciones, user.Evaluado, user.CreatedAt, Rating = rating });
+    return Results.Ok(new { user.Id, user.Nombre, user.Email, user.TallaCm, user.Posiciones, user.Evaluado, user.CreatedAt, Rating = rating, ValidacionCount = vals.Count });
 });
 
 // ── Pichangas ─────────────────────────────────────────────────────────────────
@@ -167,6 +176,20 @@ app.MapGet("/pichangas", async (bool? soloPublicas, AppDbContext db) =>
     if (soloPublicas == true) q = q.Where(p => p.Publica);
     return Results.Ok(await q.OrderByDescending(p => p.Fecha).ToListAsync());
 });
+
+app.MapGet("/pichangas/mias", async (ClaimsPrincipal claims, AppDbContext db) =>
+{
+    var userId = UserId(claims);
+    var ids = await db.PichangaMiembros
+        .Where(m => m.JugadorId == userId)
+        .Select(m => m.PichangaId)
+        .ToListAsync();
+    var pichangas = await db.Pichangas
+        .Where(p => ids.Contains(p.Id))
+        .OrderByDescending(p => p.Fecha)
+        .ToListAsync();
+    return Results.Ok(pichangas);
+}).RequireAuthorization();
 
 app.MapPost("/pichangas", async (PichangaDto dto, ClaimsPrincipal claims, AppDbContext db) =>
 {
@@ -181,6 +204,33 @@ app.MapPost("/pichangas", async (PichangaDto dto, ClaimsPrincipal claims, AppDbC
     db.PichangaMiembros.Add(new PichangaMiembro { PichangaId = p.Id, JugadorId = adminId });
     await db.SaveChangesAsync();
     return Results.Created($"/pichangas/{p.Id}", p);
+}).RequireAuthorization();
+
+app.MapDelete("/pichangas/{id:guid}", async (Guid id, ClaimsPrincipal claims, AppDbContext db) =>
+{
+    var p = await db.Pichangas.FindAsync(id);
+    if (p is null) return Results.NotFound();
+    if (p.AdminId != UserId(claims)) return Results.Forbid();
+
+    db.PichangaMiembros.RemoveRange(db.PichangaMiembros.Where(m => m.PichangaId == id));
+    db.SolicitudesUnion.RemoveRange(db.SolicitudesUnion.Where(s => s.PichangaId == id));
+    db.Pichangas.Remove(p);
+    await db.SaveChangesAsync();
+    return Results.NoContent();
+}).RequireAuthorization();
+
+app.MapPut("/pichangas/{id:guid}", async (
+    Guid id, PichangaDto dto, ClaimsPrincipal claims, AppDbContext db) =>
+{
+    var p = await db.Pichangas.FindAsync(id);
+    if (p is null) return Results.NotFound();
+    if (p.AdminId != UserId(claims)) return Results.Forbid();
+
+    (p.Nombre, p.Fecha, p.Distrito, p.Lat, p.Lng, p.Publica, p.Capacidad) =
+        (dto.Nombre, dto.Fecha, dto.Distrito, dto.Lat, dto.Lng, dto.Publica, dto.Capacidad);
+
+    await db.SaveChangesAsync();
+    return Results.Ok(p);
 }).RequireAuthorization();
 
 app.MapPost("/pichangas/{id:guid}/solicitudes", async (Guid id, ClaimsPrincipal claims, AppDbContext db) =>
@@ -234,6 +284,43 @@ app.MapPost("/pichangas/{id:guid}/solicitudes/{solId:guid}/{accion}", async (
     return Results.Ok(sol);
 }).RequireAuthorization();
 
+app.MapGet("/pichangas/{id:guid}", async (Guid id, AppDbContext db) =>
+{
+    var p = await db.Pichangas.FindAsync(id);
+    return p is null ? Results.NotFound() : Results.Ok(p);
+});
+
+app.MapGet("/pichangas/{id:guid}/miembros", async (
+    Guid id, ClaimsPrincipal claims, AppDbContext db) =>
+{
+    if (!await db.Pichangas.AnyAsync(p => p.Id == id)) return Results.NotFound();
+
+    var miembros = await db.PichangaMiembros
+        .Include(m => m.Jugador)
+        .Where(m => m.PichangaId == id)
+        .ToListAsync();
+
+    var memberIds = miembros.Select(m => m.JugadorId).ToList();
+    var allVals   = await db.Validaciones.Where(v => memberIds.Contains(v.JugadorId)).ToListAsync();
+
+    Guid? currentUserId = claims.Identity?.IsAuthenticated == true ? UserId(claims) : null;
+
+    var result = miembros.Select(m =>
+    {
+        var vals   = allVals.Where(v => v.JugadorId == m.JugadorId).ToList();
+        var rating = RatingService.CalcRating(m.Jugador, vals);
+        return new
+        {
+            m.Jugador.Id, m.Jugador.Nombre, m.Jugador.Posiciones,
+            m.Jugador.Evaluado, Rating = rating,
+            YaValidado = currentUserId.HasValue
+                && allVals.Any(v => v.JugadorId == m.JugadorId && v.AmigoId == currentUserId)
+        };
+    });
+
+    return Results.Ok(result);
+});
+
 app.MapPost("/pichangas/{id:guid}/balancear", async (
     Guid id, int? equipos, ClaimsPrincipal claims, AppDbContext db) =>
 {
@@ -242,7 +329,8 @@ app.MapPost("/pichangas/{id:guid}/balancear", async (
     if (pichanga.AdminId != UserId(claims)) return Results.Forbid();
 
     int numTeams = equipos ?? 2;
-    if (numTeams is < 2 or > 4) return Results.BadRequest("equipos must be between 2 and 4");
+    if (numTeams < 2) return Results.BadRequest("Minimum 2 teams");
+    if (numTeams > miembros.Count) return Results.BadRequest("More teams than players");
 
     var miembros = await db.PichangaMiembros
         .Include(m => m.Jugador)
