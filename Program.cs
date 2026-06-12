@@ -330,14 +330,14 @@ app.MapPost("/pichangas/{id:guid}/balancear", async (
 
     int numTeams = equipos ?? 2;
     if (numTeams < 2) return Results.BadRequest("Minimum 2 teams");
-    if (numTeams > miembros.Count) return Results.BadRequest("More teams than players");
 
     var miembros = await db.PichangaMiembros
         .Include(m => m.Jugador)
         .Where(m => m.PichangaId == id)
         .ToListAsync();
 
-    if (miembros.Count < numTeams) return Results.BadRequest("Not enough players to form teams");
+    if (numTeams > miembros.Count) return Results.BadRequest("More teams than players");
+    if (miembros.Count < 2) return Results.BadRequest("Not enough players to form teams");
 
     var memberIds = miembros.Select(m => m.JugadorId).ToList();
     var allVals   = await db.Validaciones.Where(v => memberIds.Contains(v.JugadorId)).ToListAsync();
